@@ -210,7 +210,8 @@ async function main() {
   const failedJobs = [];
   const IMG_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
   for (const j of jobs) {
-    const ref = "img_" + j.token;
+    // 封面用 cover_<token> 命名 (md_gen 按 meta.coverToken 查找), 其余用 img_<token>
+    const ref = j.cover ? "cover_" + j.token : "img_" + j.token;
     if (!j.cover && IMG_EXTS.some(e => fs.existsSync(path.join(outDir, "images", ref + e)))) { ok++; continue; } // 增量跳过
     const r = await downloadImage(j.token, j.cover ? docToken : j.id, cookie);
     if (r) { fs.writeFileSync(path.join(outDir, "images", ref + r.ext), r.buf); ok++; }
@@ -224,8 +225,9 @@ async function main() {
     const cookie2 = await getAllCookies("feishu");
     ok = 0; fail = 0;
     for (const j of failedJobs) {
+      const ref = j.cover ? "cover_" + j.token : "img_" + j.token;
       const r = await downloadImage(j.token, j.cover ? docToken : j.id, cookie2);
-      if (r) { fs.writeFileSync(path.join(outDir, "images", "img_" + j.token + r.ext), r.buf); ok++; }
+      if (r) { fs.writeFileSync(path.join(outDir, "images", ref + r.ext), r.buf); ok++; }
       else fail++;
     }
     log(`重试图片下载: ${ok} 成功, ${fail} 失败`);
@@ -317,6 +319,30 @@ async function main() {
         // 登录后重置结果, 全量重试
         finalJobs = [];
       }
+    }
+    // 兜底: 历史导出提取过的卡片资产按 recordId 存档于 ~/.feishu-export-cache, 直接复用
+    const cacheDir = path.join(process.env.USERPROFILE || process.env.HOME || ".", ".feishu-export-cache");
+    for (const b of isvBlocks) {
+      const rec = (b.recordId || "").slice(0, 16);
+      if (!rec || finalJobs.find(j => j.outPng.includes("isv_" + rec + "."))) continue;
+      const cp = path.join(cacheDir, "isv_" + rec + ".png"), ch = path.join(cacheDir, "isv_" + rec + ".html");
+      if (fs.existsSync(cp) && fs.existsSync(ch)) {
+        const hf = path.join("embeds", "isv_" + rec + ".html");
+        fs.mkdirSync(path.join(outDir, "embeds"), { recursive: true });
+        fs.copyFileSync(ch, path.join(outDir, hf));
+        finalJobs.push({ htmlFile: hf, outPng: path.join("images", "isv_" + rec + ".png") });
+        log("  卡片映射(历史缓存):", b.id, "<-", rec);
+      }
+    }
+    // 成功的卡片写入缓存, 供后续导出兜底
+    if (finalJobs.length) {
+      try {
+        fs.mkdirSync(cacheDir, { recursive: true });
+        for (const j of finalJobs) {
+          if (fs.existsSync(path.join(outDir, j.htmlFile))) fs.copyFileSync(path.join(outDir, j.htmlFile), path.join(cacheDir, path.basename(j.htmlFile)));
+          if (fs.existsSync(path.join(outDir, j.outPng))) fs.copyFileSync(path.join(outDir, j.outPng), path.join(cacheDir, path.basename(j.outPng)));
+        }
+      } catch (e) {}
     }
     fs.writeFileSync(path.join(outDir, "work", "render_jobs.json"), JSON.stringify(finalJobs));
     if (finalJobs.length) script("render_embeds.js", "embeds", "images", path.join("work", "render_jobs.json"));
