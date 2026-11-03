@@ -132,7 +132,8 @@ function cellContent(cellId) {
       const s = zoneToMd(b);
       if (s) parts.push(s.replace(/\n/g, "<br>").replace(/\|/g, "\\|"));
     } else if (b.type === "image") {
-      if (imgFile[b.id]) parts.push(`![](${imgFile[b.id]})`);
+      if (imgFile["img_" + b.imgToken]) parts.push(`![](${imgFile["img_" + b.imgToken]})`);
+      else if (imgFile[b.id]) parts.push(`![](${imgFile[b.id]})`);
     }
   }
   return parts.join("<br>");
@@ -162,9 +163,12 @@ function tableToMd(tableHtml) {
 }
 
 // ---------- 4. 块树 ----------
-// SSR id 即文档顺序; 图片懒加载引发的布局重排可能让采集顺序乱, 按 id 排序恢复
-blocks.sort((a, b) => (parseInt(a.id) || 0) - (parseInt(b.id) || 0));
-const nodes = blocks.map(b => ({ ...b, children: [] }));
+// 重要: 保持采集顺序 = 真实 DOM 顺序, 不要按 id 排序!
+// SSR 会给晚挂载的 portal 内容(表格单元格/嵌入卡片/callout 子块/网格子块)分配靠后的
+// id, 按 id 排序会把它们挪离真实位置 (第1篇的 callout 因此被拆散)。
+// back_ref_list(相关文档面板)不是正文, 且 depth=0 会把 page 挤出栈吞掉后续所有块, 剔除。
+const contentBlocks = blocks.filter(b => b.type !== "back_ref_list");
+const nodes = contentBlocks.map(b => ({ ...b, children: [] }));
 const stack = [];
 const roots = [];
 for (const n of nodes) {
@@ -175,7 +179,44 @@ for (const n of nodes) {
 }
 
 // ---------- 5. 渲染 ----------
-const md = [];
+let md = []; // 引块缓冲需要换数组, 用 let
+
+// 纯 emoji/图标行 (callout 引用块的图标与内容在飞书中视觉上同行)
+const EMOJI_ONLY = /^[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u;
+const isEmojiOnly = (s) => EMOJI_ONLY.test(s);
+
+// 将子块渲染进缓冲区并包进同一个 blockquote
+// (还原飞书引用容器/高亮块的"整块包裹"结构: 说明行+列表等子块都在引块内)
+function renderQuoted(children, selfText) {
+  const saved = md;
+  md = [];
+  renderChildren(children, 0);
+  const buf = md;
+  md = saved;
+  const lines = [];
+  for (const l of String(selfText || "").split("\n")) lines.push(l);
+  for (const l of buf) lines.push(l);
+  // 清洗: 去零宽字符; 丢弃 <br/> 噪声行
+  const ls = lines.map(l => l.replace(/\u200B/g, ""))
+    .filter(l => !/^<br\s*\/?\s*>$/i.test(l.trim()));
+  // 纯 emoji 行与下一非空行合并 (图标与首条内容同行渲染)
+  const merged = [];
+  for (let i = 0; i < ls.length; i++) {
+    const t = ls[i].trim();
+    if (t && isEmojiOnly(t) && ls[i + 1] && ls[i + 1].trim() && !isEmojiOnly(ls[i + 1].trim())) {
+      merged.push(t + " " + ls[i + 1].trim());
+      i++;
+    } else merged.push(ls[i]);
+  }
+  // 逐行加引前缀 (已是引块的行透传, 避免嵌套); 空行转为引块续行保持连续
+  let out = merged.map(l => l.trim()
+    ? l.split("\n").map(x => (x.startsWith(">") ? x : "> " + x)).join("\n")
+    : ">");
+  // 掐头去尾空引行 (避免出现空盒子)
+  while (out.length && !out[0].slice(2).trim()) out.shift();
+  while (out.length && !out[out.length - 1].slice(2).trim()) out.pop();
+  return out;
+}
 
 function renderChildren(children, listAnc) {
   for (const c of children) { c.__listAnc = listAnc; render(c); }
@@ -225,18 +266,31 @@ function render(n) {
     return;
   }
   if (t === "quote" || t === "quote_container") {
-    if (text) md.push("> " + text.replace(/\n/g, "\n> "));
-    renderChildren(n.children, 0);
+    // 引用容器: 自身文本 + 全部子块都包进同一个引块
+    md.push("");
+    for (const l of renderQuoted(n.children, text)) md.push(l);
+    md.push("");
     return;
   }
   if (t === "callout") {
-    const lines = text.split("\n");
-    md.push("", "> " + lines.join("\n> ").replace(/^> $/gm, ">"), "");
-    renderChildren(n.children, 0);
+    // 高亮块(callout): 整块包裹; 图标属性在时并入首行
+    md.push("");
+    let q = renderQuoted(n.children, text);
+    if (n.icon && q.length) {
+      const first = q.findIndex(l => l.slice(2).trim());
+      if (first >= 0) {
+        if (!/^[\p{Extended_Pictographic}]/u.test(q[first].slice(2).trimStart())) {
+          q[first] = "> " + n.icon + " " + q[first].slice(2);
+        }
+      } else q.push("> " + n.icon);
+    }
+    for (const l of q) md.push(l);
+    md.push("");
     return;
   }
   if (t === "image") {
-    const file = imgFile[n.id];
+    // 资产按图片 token 命名 (跨加载稳定), 旧版按块 id 命名兜底
+    const file = imgFile["img_" + n.imgToken] || imgFile[n.id];
     const cap = (n.caption || "").replace(/\u200B/g, "").trim();
     md.push("");
     if (file) md.push(`![${cap || "image"}](${file})`);
@@ -271,10 +325,12 @@ function render(n) {
     return;
   }
   if (t === "isv") {
-    const png = "images/isv_" + n.id + ".png";
+    // 资产按 recordId 命名 (跨加载稳定), 旧版按块 id 命名兜底
+    const rec = (n.recordId || "").slice(0, 16);
+    const png = rec ? "images/isv_" + rec + ".png" : "images/isv_" + n.id + ".png";
     md.push("");
     if (fs.existsSync(png)) {
-      md.push(`![嵌入卡片](images/isv_${n.id}.png)`);
+      md.push(`![嵌入卡片](${png.replace(/^images\//, "images/")})`);
     } else {
       const info = (n.isvData || "").replace(/\u200B/g, " ").replace(/\s+/g, " ").trim();
       md.push("> 🧩 **第三方嵌入块**（" + (info || "登录后可见") + "）");
@@ -283,10 +339,12 @@ function render(n) {
     return;
   }
   if (t === "file") {
-    const vid = "files/" + n.id + ".mp4";
+    // 视频按文件 token 命名 (跨加载稳定), 旧版按块 id 命名兜底
+    const vt = (n.fileHtml || "").match(/download\/video\/([A-Za-z0-9]+)/);
+    const vid = vt ? "files/" + vt[1] + ".mp4" : "files/" + n.id + ".mp4";
     md.push("");
     if (fs.existsSync(vid)) {
-      md.push(`▶️ **嵌入视频**（31 秒录屏）: [点击播放](files/${n.id}.mp4)`);
+      md.push(`▶️ **嵌入视频**（31 秒录屏）: [点击播放](${vid})`);
     } else {
       const clean = (n.fileHtml || "")
         .replace(/<img[\s\S]*?(\/>|>|$)/g, " ")

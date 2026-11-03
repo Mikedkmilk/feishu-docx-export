@@ -5,9 +5,19 @@
 ## 页面渲染机制
 
 - 文档是 **SSR + 虚拟化渲染**：DOM 里只保留可视区附近的块（`[data-block-id]`），滚动时动态挂载/回收。所以必须边滚动边采集（`collect_dom3.js`，每步 500px、带停顿）。
-- **块 ID 即文档顺序**：SSR 给每个块分配从 1 开始递增的 `data-block-id`。图片懒加载引发布局重排会让采集出现乱序，`md_gen.js` 生成前按 id 排序恢复。
+- **采集顺序 = 真实 DOM 顺序，切勿按 id 排序**。SSR 会给晚挂载的 portal 内容（表格单元格、嵌入卡片、callout/网格子块）分配靠后的 id，id 顺序 ≠ 文档顺序；按 id 排序会把 callout 子块等挪离真实位置、产生错误的父块归属（第 1 篇实测把整段 PRD 内容挂到了一个空文本块下）。
+- `back_ref_list`（相关文档反链面板）不是正文且 depth=0，会把 page 挤出深度栈吞掉后续全部块，建树前必须剔除。
+- **SSR 块 id 每次页面加载都会变**，跨加载引用资产必须用稳定标识：图片用 `imgToken`（`images/img_<token>.<ext>`）、嵌入卡片用 `recordId` 前 16 位（`images/isv_<rec16>.png`、`embeds/isv_<rec16>.html`）、附件视频用文件 token（`files/<token>.mp4`）。
 - 每块正文在 `data-zone-id == 块id` 的 zone 元素里；内联样式是 span 的内联 CSS（`font-weight:bold` / `italic` / `inline-code` 类），`md_gen.js` 的 `inlineHtmlToMd` 按此转 Markdown。
 - 多行文本按 `.ace-line` 分行，行内零宽字符 `\u200B` 需剔除。
+
+## 引用容器与高亮块（callout）的整块包裹
+
+飞书的引用块（quote/quote_container）和高亮块（callout）是**容器**：图标、说明行、有序/无序列表等都是其子块。Markdown 里必须把自身文本与全部子块渲染进**同一个 blockquote**（`renderQuoted`）：
+
+- 子块先渲染进缓冲区，逐行加 `> ` 前缀；已是 `>` 开头的行透传（避免嵌套引块）；空行转 `>` 保持引块连续。
+- callout 的图标（emoji）在块的图标槽里、不在任何 zone/子块中——采集时用"克隆块元素→删掉全部子块与 zone→取剩余文本里的 emoji"提取（`collect_dom3.js` 的 icon 字段）。
+- 纯 emoji 行与下一非空行合并（图标与首条内容在飞书中视觉同行）；`<br/>` 噪声行过滤；掐头去尾空引行，避免渲染出空盒子。
 
 ## 表格是虚拟化的
 
@@ -51,6 +61,7 @@ file/video 块：登录态下滚到块处，读渲染后的 `video.src`（`/spac
 ## 已知的坑
 
 - **一次只开一个文档标签**：嵌入卡片 iframe target 是浏览器全局的，多文档同开会把 A 文档的卡片提到 B 文档。
-- 白板（whiteboard）块模块在本环境不加载（登录+刷新也无效），保留占位符。
-- `back_ref_list`（相关文档反链面板）不是正文，跳过。
+- **标签页可能进入"半水合"坏状态**：滚动容器存在但滚动不生效、块不再挂载（采集只拿到十几块）。遇到就关掉该标签重开新的。
+- callout/白板等模块的渲染是间歇性的（同一环境有时不加载）；callout 不渲染时图标抓不到，白板始终无法导出，保留占位符。
+- `back_ref_list`（相关文档反链面板）不是正文且 depth=0，建树前必须剔除。
 - `md_gen.js` 对 `docx-heading1/2/3/4` 的映射是 `##`~`#####`（文档标题占 `#`）。

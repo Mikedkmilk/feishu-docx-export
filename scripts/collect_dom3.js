@@ -56,6 +56,17 @@ const COLLECT_FN = `(window.__collect3 = window.__collect3 || function(){
       order: type === 'ordered' ? ((e.querySelector('.order') || {}).innerText || '').trim() : '',
       imgToken: imgTokenEl ? imgTokenEl.getAttribute('image-token') : null,
       caption: type === 'image' ? (((e.querySelector('[class*=caption]') || {}).innerText) || '').slice(0, 300) : '',
+      // callout 图标: 剔除所有子块与 zone 后剩余的 emoji 文本 (图标渲染在块的图标槽里, 不在任何 zone 中)
+      icon: type === 'callout' ? (() => {
+        try {
+          const clone = e.cloneNode(true);
+          clone.querySelectorAll('[data-block-id]').forEach(x => x.remove());
+          clone.querySelectorAll('[data-zone-id]').forEach(x => x.remove());
+          const t = (clone.innerText || '').replace(/\\u200B/g, '').trim();
+          const m = t.match(/[\\p{Extended_Pictographic}][\\uFE0F\\u200D]?/u);
+          return m ? m[0] : '';
+        } catch (err) { return ''; }
+      })() : '',
       fileHtml: type === 'file' ? e.innerHTML.slice(0, 5000) : '',
       isvData: type === 'isv' ? (e.innerText || '').slice(0, 100) : '',
       depth: (() => { let d = 0, p = e.parentElement; while (p) { if (p.hasAttribute && p.hasAttribute('data-block-id')) d++; p = p.parentElement; } return d; })(),
