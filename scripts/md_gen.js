@@ -302,7 +302,15 @@ function render(n) {
   if (t === "table") {
     md.push("");
     let tbl = "";
-    if (Array.isArray(n.rows) && n.rows.length) {
+    if (Array.isArray(n.cellTexts) && n.cellTexts.length) {
+      // OT 直接重建的文本矩阵 (表格模块渲染不全时的兜底, cellTexts 优先)
+      const grid = n.cellTexts.map(r => r.map(c => String(c).replace(/\n/g, "<br>").replace(/\|/g, "\\|")));
+      const nCols = Math.max(...grid.map(r => r.length));
+      for (const r of grid) while (r.length < nCols) r.push("");
+      const out = ["| " + grid[0].join(" | ") + " |", "|" + Array(nCols).fill(" --- ").join("|") + "|"];
+      for (let i = 1; i < grid.length; i++) out.push("| " + grid[i].join(" | ") + " |");
+      tbl = out.join("\n");
+    } else if (Array.isArray(n.rows) && n.rows.length) {
       // tr[data-index] 行容器采集的完整网格
       const grid = n.rows.map(r => r.map(id => cellContent(id)));
       const nCols = Math.max(...grid.map(r => r.length));

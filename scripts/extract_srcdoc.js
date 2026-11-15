@@ -18,7 +18,7 @@ async function main() {
   const outFile = process.argv[2];
   const list = JSON.parse(await httpReq("http://127.0.0.1:9222/json/list"));
   const ver = JSON.parse(await httpReq("http://127.0.0.1:9222/json/version"));
-  const targets = list.filter(t => t.type === "iframe" && /feishupkg/.test(t.url));
+  const targets = list.filter(t => t.type === "iframe" && /feishupkg|larksuite|blk_|larkoffice|feishu/i.test(t.url) && !/accounts.|session-tools|passport/.test(t.url));
   console.error(`iframe targets: ${targets.length}`);
 
   const ws = new WebSocket(ver.webSocketDebuggerUrl);

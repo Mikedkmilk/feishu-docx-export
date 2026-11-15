@@ -14,12 +14,18 @@ const url = args.find(a => !a.startsWith("--"));
 const opt = (name, def) => { const i = args.indexOf("--" + name); return i >= 0 ? args[i + 1] : def; };
 const flag = (name) => args.includes("--" + name);
 
-if (!url || !/feishu\.cn\/docx\/([A-Za-z0-9]+)/.test(url)) {
+// 支持飞书/Lark 全系域名: feishu.cn (含 my./个人子域) / larkoffice.com / larksuite.com
+const URL_RE = /(?:feishu\.cn|larkoffice\.com|larksuite\.com)\/(?:docx|wiki)\/([A-Za-z0-9]+)/;
+if (!url || !URL_RE.test(url)) {
   console.error("用法: node export.js <飞书文档URL> [--out <目录>] [--headed] [--profile <目录>] [--port <9222>] [--keep-open]");
+  console.error("  支持: https://my.feishu.cn/docx/xxx, https://xxx.larkoffice.com/docx/xxx, https://xxx.larksuite.com/docx/xxx");
   console.error("  --headed   显示浏览器窗口 (用于扫码登录后导出含嵌入卡片/附件的文档)");
   process.exit(1);
 }
-const docToken = url.match(/feishu\.cn\/docx\/([A-Za-z0-9]+)/)[1];
+const docToken = url.match(URL_RE)[1];
+// 站点域 (图片 CDN 与 Referer 按站点推导): feishu.cn | larkoffice.com | larksuite.com
+const siteDomain = new URL(url).hostname.split(".").slice(-2).join(".");
+const driveCdn = "internal-api-drive-stream." + siteDomain;
 const outDir = path.resolve(opt("out", "./feishu_export"));
 const profileDir = path.resolve(opt("profile", path.join(process.env.USERPROFILE || process.env.HOME || ".", ".feishu-export-profile")));
 const port = opt("port", "9222");
@@ -78,7 +84,7 @@ async function waitRender(tabId, timeoutMs = 120000) {
     while (Date.now() - start < timeoutMs) {
       await sleep(2500);
       try {
-        const s = await page.eval(`JSON.stringify({t:document.title.length,c:(document.body.innerText||'').length,b:document.querySelectorAll('[data-block-id]').length,login:(document.body.innerText||'').includes('登录/注册')})`);
+        const s = await page.eval(`JSON.stringify({t:document.title.length,c:(document.body.innerText||'').length,b:document.querySelectorAll('[data-block-id]').length,login:/(登录|Log in|Sign in)/i.test(document.body.innerText||'')})`);
         const d = JSON.parse(s);
         log(`  渲染中: blocks=${d.b} chars=${d.c} ${d.login ? "(未登录)" : "(已登录)"}`);
         if (d.login && d.b <= 2 && d.c < 300) { loginWallStreak++; if (loginWallStreak >= 2) return { needLogin: true }; }
@@ -99,7 +105,7 @@ async function isLoggedIn(tabId) {
   let page;
   try { page = await connect(tabId); } catch (e) { return false; }
   try {
-    const s = await page.eval(`JSON.stringify({login:(document.body.innerText||'').includes('登录/注册'),b:document.querySelectorAll('[data-block-id]').length})`);
+    const s = await page.eval(`JSON.stringify({login:/(登录|Log in|Sign in)/i.test(document.body.innerText||''),b:document.querySelectorAll('[data-block-id]').length})`);
     const d = JSON.parse(s);
     return !d.login && d.b > 0;
   } catch (e) { return false; }
@@ -146,8 +152,8 @@ async function ensureLogin(tabId) {
 
 // 下载一张图片: 带鉴权失败后自动降级为匿名重试; 校验魔数, 防止把错误页存成图片
 async function downloadImage(token, mountId, cookie) {
-  const u = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/${token}/?fallback_source=1&height=1280&mount_node_token=${mountId}&mount_point=docx_image&policy=equal&width=1280`;
-  for (const [label, headers] of [["带登录态", { "User-Agent": UA, Cookie: cookie, Referer: "https://my.feishu.cn/" }], ["匿名重试", { "User-Agent": UA, Referer: "https://my.feishu.cn/" }]]) {
+  const u = `https://${driveCdn}/space/api/box/stream/download/v2/cover/${token}/?fallback_source=1&height=1280&mount_node_token=${mountId}&mount_point=docx_image&policy=equal&width=1280`;
+  for (const [label, headers] of [["带登录态", { "User-Agent": UA, Cookie: cookie, Referer: url }], ["匿名重试", { "User-Agent": UA, Referer: url }]]) {
     try {
       const res = await fetch(u, { headers, redirect: "follow" });
       const buf = Buffer.from(await res.arrayBuffer());
@@ -201,7 +207,7 @@ async function main() {
   log("标题:", meta.title);
 
   // 4. 下载图片 + 封面 (token 命名, 鉴权降级重试)
-  const cookie = await getAllCookies("feishu");
+  const cookie = await getAllCookies(null);
   const jobs = [];
   for (const b of blocks) if (b.type === "image" && b.imgToken) jobs.push({ id: b.id, token: b.imgToken });
   for (const arr of Object.values(cellBlocks || {})) for (const b of arr) if (b.type === "image" && b.imgToken && !jobs.find(j => j.id === b.id)) jobs.push({ id: b.id, token: b.imgToken });
@@ -222,7 +228,7 @@ async function main() {
   if (fail > 0 && fail >= jobs.length * 0.5) {
     log("⚠ 图片大面积下载失败, 疑似登录态过期/无权限, 触发登录流程后重试...");
     tabId = await ensureLogin(tabId);
-    const cookie2 = await getAllCookies("feishu");
+    const cookie2 = await getAllCookies(null);
     ok = 0; fail = 0;
     for (const j of failedJobs) {
       const ref = j.cover ? "cover_" + j.token : "img_" + j.token;
@@ -362,7 +368,7 @@ async function main() {
         await sleep(3000);
         const src = await pg.eval(`(function(){const el=[...document.querySelectorAll('[data-block-id]')].find(e=>e.getAttribute('data-block-id')==='${b.id}');if(!el)return '';const m=el.querySelector('video,audio');return m?(m.src||''):''})()`);
         if (src && src.startsWith("http")) {
-          const res = await fetch(src, { headers: { "User-Agent": UA, Cookie: await getAllCookies("feishu"), Referer: "https://my.feishu.cn/" } });
+          const res = await fetch(src, { headers: { "User-Agent": UA, Cookie: await getAllCookies(null), Referer: url } });
           if (res.status === 200) {
             const token = (src.match(/download\/video\/([A-Za-z0-9]+)/) || [])[1] || b.id;
             fs.writeFileSync(path.join(outDir, "files", token + ".mp4"), Buffer.from(await res.arrayBuffer()));
