@@ -192,12 +192,12 @@ async function main() {
   const { blocks, cellBlocks } = blocksData;
   const pageBlock = blocks.find(b => b.type === "page");
 
-  // 3. meta (标题/封面)
+  // 3. meta (标题/封面/真实页面 id — wiki 链接时 page_id 才是文档页 token)
   let meta = {};
   {
     const page = await connect(tabId);
     try {
-      const m = await page.eval(`(function(){const cv=window.DATA&&window.DATA.clientVars;if(!cv||!cv.data)return '{}';const d=cv.data;const pid=Object.keys(d.meta_map||{})[0];const pg=d.block_map[pid];return JSON.stringify({title:(d.meta_map[pid]&&d.meta_map[pid].title)||'',coverToken:pg&&pg.data&&pg.data.cover&&pg.data.cover.token||null})})()`);
+      const m = await page.eval(`(function(){const cv=window.DATA&&window.DATA.clientVars;if(!cv||!cv.data)return '{}';const d=cv.data;const pid=Object.keys(d.meta_map||{})[0];const pg=d.block_map[pid];return JSON.stringify({title:(d.meta_map[pid]&&d.meta_map[pid].title)||'',coverToken:pg&&pg.data&&pg.data.cover&&pg.data.cover.token||null,pageId:(d.meta_map[pid]&&d.meta_map[pid].page_id)||pid})})()`);
       meta = JSON.parse(m);
     } catch (e) { log("clientVars 不可用:", e.message.slice(0, 60)); }
     page.close();
@@ -211,7 +211,7 @@ async function main() {
   const jobs = [];
   for (const b of blocks) if (b.type === "image" && b.imgToken) jobs.push({ id: b.id, token: b.imgToken });
   for (const arr of Object.values(cellBlocks || {})) for (const b of arr) if (b.type === "image" && b.imgToken && !jobs.find(j => j.id === b.id)) jobs.push({ id: b.id, token: b.imgToken });
-  if (meta.coverToken) jobs.push({ id: "cover_" + meta.coverToken, token: meta.coverToken, cover: true, mount: docToken });
+  if (meta.coverToken) jobs.push({ id: "cover_" + meta.coverToken, token: meta.coverToken, cover: true, mount: meta.pageId || docToken });
   let ok = 0, fail = 0;
   const failedJobs = [];
   const IMG_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
@@ -219,7 +219,7 @@ async function main() {
     // 封面用 cover_<token> 命名 (md_gen 按 meta.coverToken 查找), 其余用 img_<token>
     const ref = j.cover ? "cover_" + j.token : "img_" + j.token;
     if (!j.cover && IMG_EXTS.some(e => fs.existsSync(path.join(outDir, "images", ref + e)))) { ok++; continue; } // 增量跳过
-    const r = await downloadImage(j.token, j.cover ? docToken : j.id, cookie);
+    const r = await downloadImage(j.token, j.cover ? (meta.pageId || docToken) : j.id, cookie);
     if (r) { fs.writeFileSync(path.join(outDir, "images", ref + r.ext), r.buf); ok++; }
     else { fail++; failedJobs.push(j); }
   }
@@ -232,7 +232,7 @@ async function main() {
     ok = 0; fail = 0;
     for (const j of failedJobs) {
       const ref = j.cover ? "cover_" + j.token : "img_" + j.token;
-      const r = await downloadImage(j.token, j.cover ? docToken : j.id, cookie2);
+      const r = await downloadImage(j.token, j.cover ? (meta.pageId || docToken) : j.id, cookie2);
       if (r) { fs.writeFileSync(path.join(outDir, "images", ref + r.ext), r.buf); ok++; }
       else fail++;
     }
