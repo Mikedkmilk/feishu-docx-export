@@ -347,12 +347,13 @@ function render(n) {
     return;
   }
   if (t === "file") {
-    // 视频按文件 token 命名 (跨加载稳定), 旧版按块 id 命名兜底
+    // 视频按文件 token 命名 (跨加载稳定); collect_files 采集后 fileToken 优先
     const vt = (n.fileHtml || "").match(/download\/video\/([A-Za-z0-9]+)/);
-    const vid = vt ? "files/" + vt[1] + ".mp4" : "files/" + n.id + ".mp4";
+    const token = n.fileToken || (vt && vt[1]);
+    const vid = token ? "files/" + token + ".mp4" : "files/" + n.id + ".mp4";
     md.push("");
     if (fs.existsSync(vid)) {
-      md.push(`▶️ **嵌入视频**（31 秒录屏）: [点击播放](${vid})`);
+      md.push(`▶️ **嵌入视频**: [点击播放](${vid})`);
     } else {
       const clean = (n.fileHtml || "")
         .replace(/<img[\s\S]*?(\/>|>|$)/g, " ")
